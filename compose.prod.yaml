@@ -1,0 +1,99 @@
+name: takda
+
+x-app: &app
+  image: "${APP_IMAGE:-takda-web:latest}"
+  env_file:
+    - .env.production
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  app:
+    <<: *app
+    build:
+      context: .
+      target: production
+    command: php-fpm -F
+    healthcheck:
+      test: ["CMD", "php-fpm", "-t"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: "${NGINX_IMAGE:-takda-nginx:latest}"
+    build:
+      context: .
+      target: nginx-production
+    ports:
+      - "${FORWARD_HTTP_PORT:-80}:80"
+    depends_on:
+      app:
+        condition: service_healthy
+      reverb:
+        condition: service_started
+    restart: unless-stopped
+
+  horizon:
+    <<: *app
+    command: php artisan horizon
+    stop_grace_period: 30s
+
+  scheduler:
+    <<: *app
+    command: php artisan schedule:work
+    stop_grace_period: 30s
+
+  reverb:
+    <<: *app
+    command: php artisan reverb:start --host=0.0.0.0 --port=8080
+    stop_grace_period: 30s
+
+  mysql:
+    image: mysql:8.4
+    env_file:
+      - .env.production
+    environment:
+      MYSQL_DATABASE: "${DB_DATABASE}"
+      MYSQL_USER: "${DB_USERNAME}"
+      MYSQL_PASSWORD: "${DB_PASSWORD}"
+      MYSQL_ROOT_PASSWORD: "${DB_ROOT_PASSWORD}"
+      TZ: Asia/Manila
+    ports:
+      - "127.0.0.1:${FORWARD_DB_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    env_file:
+      - .env.production
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD}"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  redis-data:
+

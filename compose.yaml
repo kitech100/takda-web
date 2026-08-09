@@ -1,0 +1,140 @@
+name: takda
+
+x-app: &app
+  image: takda-web:dev
+  build:
+    context: .
+    target: development
+  working_dir: /var/www/html
+  volumes:
+    - ./:/var/www/html
+    - vendor-data:/var/www/html/vendor
+  depends_on:
+    composer:
+      condition: service_completed_successfully
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  composer:
+    image: takda-web:dev
+    build:
+      context: .
+      target: development
+    working_dir: /var/www/html
+    command: sh -c "composer install --no-interaction --prefer-dist && php artisan wayfinder:generate --with-form"
+    volumes:
+      - ./:/var/www/html
+      - vendor-data:/var/www/html/vendor
+    restart: "no"
+
+  node:
+    image: node:22-alpine
+    working_dir: /var/www/html
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
+    environment:
+      WAYFINDER_COMMAND: "true"
+      VITE_ORIGIN: "http://localhost:${FORWARD_VITE_PORT:-5173}"
+      VITE_APP_ORIGIN: "http://localhost:${FORWARD_HTTP_PORT:-8080}"
+      VITE_HMR_HOST: "localhost"
+      VITE_HMR_CLIENT_PORT: "${FORWARD_VITE_PORT:-5173}"
+    depends_on:
+      composer:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${FORWARD_VITE_PORT:-5173}:5173"
+    volumes:
+      - ./:/var/www/html
+      - node-modules:/var/www/html/node_modules
+    restart: unless-stopped
+
+  app:
+    <<: *app
+    command: php-fpm -F
+    healthcheck:
+      test: ["CMD", "php-fpm", "-t"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:1.29-alpine
+    ports:
+      - "${FORWARD_HTTP_PORT:-8080}:80"
+    volumes:
+      - ./public:/var/www/html/public:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      app:
+        condition: service_healthy
+      node:
+        condition: service_started
+      reverb:
+        condition: service_started
+    restart: unless-stopped
+
+  horizon:
+    <<: *app
+    command: php artisan horizon
+    stop_grace_period: 30s
+
+  scheduler:
+    <<: *app
+    command: php artisan schedule:work
+    stop_grace_period: 30s
+
+  reverb:
+    <<: *app
+    command: php artisan reverb:start --host=0.0.0.0 --port=8080
+    stop_grace_period: 30s
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: "${DB_DATABASE:-takda}"
+      MYSQL_USER: "${DB_USERNAME:-takda}"
+      MYSQL_PASSWORD: "${DB_PASSWORD:-takda_secret}"
+      MYSQL_ROOT_PASSWORD: "${DB_ROOT_PASSWORD:-takda_root_secret}"
+      TZ: Asia/Manila
+    ports:
+      - "127.0.0.1:${FORWARD_DB_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-takda_redis_secret}"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-takda_redis_secret}"
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "127.0.0.1:${FORWARD_MAILPIT_PORT:-8025}:8025"
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  node-modules:
+  redis-data:
+  vendor-data:
